@@ -1,0 +1,6 @@
+{
+  "dependencies": [],
+  "name": "Unite API",
+  "main": "unite-api.yaml",
+  "classifier": "oas"
+}
