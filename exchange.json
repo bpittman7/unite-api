@@ -2,5 +2,6 @@
   "dependencies": [],
   "name": "Unite API",
   "main": "unite-api.yaml",
-  "classifier": "oas"
+  "classifier": "oas",
+  "groupId": "0b49beee-037b-4578-8a64-930d1dfd35ac"
 }
