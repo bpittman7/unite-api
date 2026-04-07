@@ -1,0 +1,540 @@
+openapi: 3.1.0
+info:
+  title: Unite Processing API
+  version: 1.0.0
+  description: >
+    Unite data lake processing API. Accepts raw file uploads from MuleSoft,
+    processes and enriches the data, and exposes status polling and result
+    retrieval endpoints.
+
+    ## Configurable delay (mock / benchmarking)
+
+    The `POST /api/v1/process` endpoint accepts a `?delay` query parameter
+    (milliseconds) to simulate processing latency. Use it to prove the
+    throughput difference between sequential and parallel call patterns:
+
+    | Pattern | Delay | Files | Wall-clock time |
+    |---------|-------|-------|-----------------|
+    | Sequential | 3 000 ms | 3 | ~9 s |
+    | Parallel (`Promise.all`) | 3 000 ms | 3 | ~3 s |
+
+    ## File behaviour (mock scenarios)
+
+    | File | Attempt | Outcome |
+    |------|---------|---------|
+    | `ridgeway_pos_feb2026.csv` | 1 | success |
+    | `ridgeway_erp_feb2026.xlsx` | 1 | success |
+    | `ridgeway_summary_feb2026.txt` | 1 & 2 | failed — missing column |
+    | `ridgeway_summary_feb2026.txt` | 3 (or `_v2` filename) | success |
+
+  contact:
+    name: Platform Integration Team
+    email: platform@firm.example.com
+
+servers:
+  - url: https://unite.api.example.com/api/v1
+    description: Production
+  - url: https://mock.unite.api.example.com/api/v1
+    description: Mock / sandbox
+
+tags:
+  - name: Processing
+    description: Submit files for ingestion, normalisation, and enrichment
+  - name: Status
+    description: Poll job status
+  - name: Results
+    description: Retrieve processed output or error details
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+
+security:
+  - ApiKeyAuth: []
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+paths:
+
+  /process:
+    post:
+      operationId: submitFileForProcessing
+      summary: Submit a file for processing
+      description: >
+        Accepts a raw file upload via `multipart/form-data`. The file is
+        queued for normalisation and enrichment in the Unite data lake.
+        Returns a synchronous result once processing completes (or fails).
+
+        ### Delay parameter (mock / benchmarking only)
+
+        Pass `?delay=<ms>` to hold the response for the given number of
+        milliseconds before returning. Omit in production — the parameter is
+        silently ignored by non-mock environments.
+
+        ### Retry guidance
+
+        When the response body contains `"retry_suggested": true`, the caller
+        should inspect the `error` field, correct the file, and resubmit.
+        After two failed attempts with the same file, upload a corrected
+        version (e.g. append `_v2` to the filename) before retrying.
+      tags: [Processing]
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: delay
+          in: query
+          required: false
+          description: >
+            Simulated processing delay in milliseconds (mock environments
+            only). Range 0–30 000. Defaults to `0`.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 30000
+            default: 0
+          example: 3000
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The raw data file to process (CSV, XLSX, or TXT)
+                engagement_id:
+                  type: string
+                  description: >
+                    Optional engagement reference for downstream correlation
+                    (e.g. `ENG-2026-0142`)
+                  example: ENG-2026-0142
+                file_type:
+                  type: string
+                  description: >
+                    Hint to the processing engine about the expected file
+                    schema. If omitted, Unite will attempt auto-detection.
+                  enum:
+                    - retail_pos_summary
+                    - erp_journal
+                    - summary_report
+                  example: retail_pos_summary
+            encoding:
+              file:
+                contentType: text/csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, text/plain
+      responses:
+        '200':
+          description: File processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessSuccess'
+              examples:
+                posFile:
+                  summary: Retail POS file — success
+                  value:
+                    status: complete
+                    file_name: ridgeway_pos_feb2026.csv
+                    rows_processed: 147
+                    rows_failed: 0
+                    output_url: /api/v1/results/job_a1b2c3
+                erpFile:
+                  summary: ERP journal file — success
+                  value:
+                    status: complete
+                    file_name: ridgeway_erp_feb2026.xlsx
+                    rows_processed: 312
+                    rows_failed: 0
+                    output_url: /api/v1/results/job_d4e5f6
+                summaryFileFixed:
+                  summary: Summary file v2 — success after correction
+                  value:
+                    status: complete
+                    file_name: ridgeway_summary_feb2026_v2.txt
+                    rows_processed: 52
+                    rows_failed: 0
+                    output_url: /api/v1/results/job_g7h8i9
+        '422':
+          description: >
+            File was received but failed validation. Inspect `error` and
+            `retry_suggested` before resubmitting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessFailure'
+              examples:
+                missingColumn:
+                  summary: Summary file — missing required column
+                  value:
+                    status: failed
+                    file_name: ridgeway_summary_feb2026.txt
+                    error: 'Missing required column: Amount'
+                    rows_processed: 0
+                    retry_suggested: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /status/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+
+    get:
+      operationId: getJobStatus
+      summary: Poll the status of a processing job
+      description: >
+        Lightweight endpoint for polling. MuleSoft should poll this endpoint
+        after `POST /process` returns a `job_id` (or after submitting to a
+        staging table) until `status` is `complete` or `failed`.
+
+        Recommended polling interval: 2–5 seconds with exponential backoff.
+        Jobs not retrieved within 24 hours may be purged.
+      tags: [Status]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Job status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+              examples:
+                queued:
+                  summary: Job is waiting in the queue
+                  value:
+                    job_id: job_a1b2c3
+                    status: queued
+                    created_at: '2026-04-06T14:00:00Z'
+                processing:
+                  summary: Job is actively being processed
+                  value:
+                    job_id: job_a1b2c3
+                    status: processing
+                    created_at: '2026-04-06T14:00:00Z'
+                    started_at: '2026-04-06T14:00:03Z'
+                complete:
+                  summary: Job completed successfully
+                  value:
+                    job_id: job_a1b2c3
+                    status: complete
+                    created_at: '2026-04-06T14:00:00Z'
+                    started_at: '2026-04-06T14:00:03Z'
+                    completed_at: '2026-04-06T14:00:06Z'
+                failed:
+                  summary: Job failed
+                  value:
+                    job_id: job_a1b2c3
+                    status: failed
+                    created_at: '2026-04-06T14:00:00Z'
+                    started_at: '2026-04-06T14:00:03Z'
+                    completed_at: '2026-04-06T14:00:04Z'
+                    error: 'Missing required column: Amount'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /results/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+
+    get:
+      operationId: getJobResults
+      summary: Retrieve processed output for a completed job
+      description: >
+        Returns the normalised and enriched CSV output produced by Unite.
+        Only available when `GET /status/{jobId}` returns `"status": "complete"`.
+
+        For failed jobs, this endpoint returns the error detail payload
+        (JSON) rather than CSV output — the `Content-Type` response header
+        should be checked before parsing.
+      tags: [Results]
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: >
+            Processed output. `Content-Type` is `text/csv` for successful
+            jobs and `application/json` for failed jobs.
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+              example: |
+                transaction_id,date,store_id,amount,tax_jurisdiction,tax_amount
+                TXN-0001,2026-02-01,STR-042,149.99,IL-COOK,13.50
+                TXN-0002,2026-02-01,STR-042,29.99,IL-COOK,2.70
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobErrorDetail'
+              example:
+                job_id: job_a1b2c3
+                status: failed
+                file_name: ridgeway_summary_feb2026.txt
+                error: 'Missing required column: Amount'
+                rows_processed: 0
+                rows_failed: 0
+                suggested_fix: >
+                  Ensure the source file contains an 'Amount' column in
+                  position 4 or with that exact header label. Re-export from
+                  the source system and resubmit.
+                retry_suggested: true
+        '202':
+          description: Job is still processing — results not yet available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+              example:
+                job_id: job_a1b2c3
+                status: processing
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+
+components:
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key issued by Unite platform team
+
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      description: Unique job identifier returned by `POST /process` or a staging callback
+      schema:
+        type: string
+      example: job_a1b2c3
+
+  schemas:
+
+    # ---- Processing results -----------------------------------------------
+
+    ProcessStatus:
+      type: string
+      enum: [complete, failed]
+      description: Terminal processing outcome
+
+    ProcessSuccess:
+      type: object
+      required: [status, file_name, rows_processed, rows_failed, output_url]
+      properties:
+        status:
+          type: string
+          enum: [complete]
+          example: complete
+        file_name:
+          type: string
+          description: Name of the file that was processed
+          example: ridgeway_pos_feb2026.csv
+        rows_processed:
+          type: integer
+          minimum: 0
+          description: Number of rows successfully ingested
+          example: 147
+        rows_failed:
+          type: integer
+          minimum: 0
+          description: Number of rows that failed validation within the file
+          example: 0
+        output_url:
+          type: string
+          description: Relative URL to retrieve the processed output
+          example: /api/v1/results/job_a1b2c3
+
+    ProcessFailure:
+      type: object
+      required: [status, file_name, error, rows_processed, retry_suggested]
+      properties:
+        status:
+          type: string
+          enum: [failed]
+          example: failed
+        file_name:
+          type: string
+          example: ridgeway_summary_feb2026.txt
+        error:
+          type: string
+          description: Human-readable description of the failure reason
+          example: 'Missing required column: Amount'
+        rows_processed:
+          type: integer
+          minimum: 0
+          example: 0
+        retry_suggested:
+          type: boolean
+          description: >
+            `true` if the error is likely correctable by fixing the source
+            file and resubmitting
+          example: true
+
+    # ---- Job status -------------------------------------------------------
+
+    JobStatusValue:
+      type: string
+      enum: [queued, processing, complete, failed]
+      description: >
+        Lifecycle stage of a processing job.
+        - `queued` — received, waiting for a worker
+        - `processing` — actively being normalised / enriched
+        - `complete` — finished; results available at `/results/{jobId}`
+        - `failed` — terminal failure; error details available at `/results/{jobId}`
+
+    JobStatus:
+      type: object
+      required: [job_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+          example: job_a1b2c3
+        status:
+          $ref: '#/components/schemas/JobStatusValue'
+        created_at:
+          type: string
+          format: date-time
+          example: '2026-04-06T14:00:00Z'
+        started_at:
+          type: string
+          format: date-time
+          description: Set when processing begins; absent if still queued
+          example: '2026-04-06T14:00:03Z'
+        completed_at:
+          type: string
+          format: date-time
+          description: Set on terminal states (`complete` or `failed`)
+          example: '2026-04-06T14:00:06Z'
+        error:
+          type: string
+          description: Populated when `status` is `failed`
+          example: 'Missing required column: Amount'
+
+    # ---- Error detail (results endpoint for failed jobs) ------------------
+
+    JobErrorDetail:
+      type: object
+      required: [job_id, status, file_name, error, rows_processed, rows_failed, retry_suggested]
+      properties:
+        job_id:
+          type: string
+          example: job_a1b2c3
+        status:
+          type: string
+          enum: [failed]
+        file_name:
+          type: string
+          example: ridgeway_summary_feb2026.txt
+        error:
+          type: string
+          example: 'Missing required column: Amount'
+        rows_processed:
+          type: integer
+          minimum: 0
+          example: 0
+        rows_failed:
+          type: integer
+          minimum: 0
+          example: 0
+        suggested_fix:
+          type: string
+          description: >
+            Plain-language remediation advice to return to the MuleSoft
+            integration layer and surface to the engagement team
+          example: >
+            Ensure the source file contains an 'Amount' column in position 4
+            or with that exact header label. Re-export from the source system
+            and resubmit.
+        retry_suggested:
+          type: boolean
+          example: true
+
+    # ---- Shared error envelope --------------------------------------------
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          example: Request failed schema validation
+        details:
+          type: object
+          additionalProperties: true
+
+  responses:
+    BadRequest:
+      description: Malformed request or missing required fields
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: BAD_REQUEST
+            message: multipart/form-data body must include a 'file' part
+
+    Unauthorized:
+      description: Missing or invalid X-API-Key header
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: X-API-Key header is missing or invalid
+
+    NotFound:
+      description: Job ID not found or results have been purged
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: No job found for job_a1b2c3
+
+    PayloadTooLarge:
+      description: Uploaded file exceeds the maximum allowed size
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: PAYLOAD_TOO_LARGE
+            message: File size exceeds the 50 MB limit
+
+    InternalError:
+      description: Unexpected server-side error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: INTERNAL_ERROR
+            message: An unexpected error occurred
