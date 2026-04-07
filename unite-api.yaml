@@ -28,13 +28,13 @@ info:
     | `ridgeway_summary_feb2026.txt` | 3 (or `_v2` filename) | success |
 
   contact:
-    name: Platform Integration Team
-    email: platform@firm.example.com
+    name: Brandon Pittman
+    email: bpittman@salesforce.com
 
 servers:
-  - url: https://unite.api.example.com/api/v1
+  - url: https://gtpoc-prod.example.com/api/unite/v1
     description: Production
-  - url: https://mock.unite.api.example.com/api/v1
+  - url: https://gtpoc-mock.unite.api.example.com/api/unite/v1
     description: Mock / sandbox
 
 tags:
@@ -45,12 +45,7 @@ tags:
   - name: Results
     description: Retrieve processed output or error details
 
-# ---------------------------------------------------------------------------
-# Security
-# ---------------------------------------------------------------------------
 
-security:
-  - ApiKeyAuth: []
 
 # ---------------------------------------------------------------------------
 # Paths
