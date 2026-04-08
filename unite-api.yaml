@@ -75,8 +75,6 @@ paths:
         After two failed attempts with the same file, upload a corrected
         version (e.g. append `_v2` to the filename) before retrying.
       tags: [Processing]
-      security:
-        - ApiKeyAuth: []
       parameters:
         - name: delay
           in: query
