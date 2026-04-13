@@ -1,7 +1,7 @@
 openapi: 3.0.1
 info:
   title: Unite Processing API
-  version: 1.0.3
+  version: 1.0.4
   description: >
     Unite data lake processing API. Accepts raw file uploads from MuleSoft,
     processes and enriches the data, and exposes status polling and result
@@ -69,6 +69,12 @@ paths:
             maximum: 30000
             default: 0
           example: 3000
+        - name: file_name
+          in: query
+          required: false
+          schema:
+            type: string
+          example: ridgeway_pos_feb2026.csv
       requestBody:
         required: true
         content:
