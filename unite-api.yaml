@@ -57,12 +57,6 @@ paths:
         Returns a synchronous result once processing completes (or fails).
       tags: [Processing]
       parameters:
-          - name: file_name
-            in: query
-            required: false
-            schema:
-              type: string
-            example: ridgeway_pos_feb2026.csv
         - name: delay
           in: query
           required: false
@@ -75,6 +69,12 @@ paths:
             maximum: 30000
             default: 0
           example: 3000
+          - name: file_name
+            in: query
+            required: false
+            schema:
+              type: string
+            example: ridgeway_pos_feb2026.csv
       requestBody:
         required: true
         content:
